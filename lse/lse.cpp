@@ -3,6 +3,8 @@
 #include <stdexcept>
 #include <vector>
 #include <io.h>
+#include <cstdlib>
+#include <climits>
 #include "elf.h"
 #include "error.h"
 
@@ -84,43 +86,67 @@ unsigned int LoadELF(const char* filename)
 void Run(unsigned int addr)
 {
     printf("Starting execution...\n\n");
-    __asm {
-        jmp addr
-    }
+    reinterpret_cast<void (*)()>(addr)();
 }
+
+#if __SIZEOF_POINTER__ == 8
+  #define REG_EAX(info) info->ContextRecord->Rax
+  #define REG_EBX(info) info->ContextRecord->Rbx
+  #define REG_ECX(info) info->ContextRecord->Rcx
+  #define REG_EDX(info) info->ContextRecord->Rdx
+  #define REG_EIP(info) info->ContextRecord->Rip
+  #define VAL_32(v) ((int) v)
+  #define PTR long long
+#else
+  #define REG_EAX(info) info->ContextRecord->Eax
+  #define REG_EBX(info) info->ContextRecord->Ebx
+  #define REG_ECX(info) info->ContextRecord->Ecx
+  #define REG_EDX(info) info->ContextRecord->Edx
+  #define REG_EIP(info) info->ContextRecord->Eip
+  #define VAL_32(v) (v)
+  #define PTR long
+#endif
 
 LONG CALLBACK VectoredExceptionHandler(PEXCEPTION_POINTERS info)
 {
-    if(!info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+    if(info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
         return EXCEPTION_CONTINUE_SEARCH;
 
-    unsigned char* instr = (unsigned char*)info->ContextRecord->Eip;
+    unsigned char* instr = reinterpret_cast<unsigned char *>(REG_EIP(info));
     if(instr[0] == 0xcd && // int
        instr[1] == 0x80)   // 80
     {
-        switch(info->ContextRecord->Eax)
+        switch(REG_EAX(info))
         {
         case 1: // SYS_exit
             {
-                int code = info->ContextRecord->Ebx;
+                int code = REG_EBX(info);
                 exit(code);
                 break;
             }
         case 4: // SYS_write
             {
-                int fd = info->ContextRecord->Ebx;
-                const char* str = (const char*)info->ContextRecord->Ecx;
-                size_t len = info->ContextRecord->Edx;
+                int fd = VAL_32(REG_EBX(info));
+                const char* str = reinterpret_cast<const char *>(REG_ECX(info));
+                size_t len = (size_t) REG_EDX(info);
                 int written = _write(fd, str, len);
-                info->ContextRecord->Eax = written;
+                REG_EAX(info) = written;
+                break;
+            }
+        case 192: // mmap  we ignore everything here except the amount of bytes allocated
+            {
+                int bytes = VAL_32(REG_ECX(info));
+                void *alloc = malloc(bytes);
+                intptr_t ret = (alloc == NULL) ? -1 : reinterpret_cast<intptr_t>(alloc);
+                REG_EAX(info) = reinterpret_cast<PTR>(ret);
                 break;
             }
         default:
-            printf("Unknown syscall %d\n", info->ContextRecord->Eax);
+            printf("Unknown syscall %d\n", VAL_32(REG_EAX(info)));
             break;
         }
 
-        info->ContextRecord->Eip+=2;    // "int 80" is two bytes long
+        REG_EIP(info) += 2;    // "int 80" is two bytes long
         return EXCEPTION_CONTINUE_EXECUTION;
     }
 
